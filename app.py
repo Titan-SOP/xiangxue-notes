@@ -334,28 +334,49 @@ def extract_chapter_images_docx(doc: DocxDocument, start_para: int, end_para: in
 
 # ── Supabase 資料操作 ─────────────────────────────────────
 def db_upsert_chapter(ch: dict):
-    """新增或更新章節基本資料"""
-    supabase.table("chapters").upsert({
+    """新增或更新章節基本資料（先查後寫，避免衝突錯誤）"""
+    data = {
         "num": ch["num"],
         "name": ch["name"],
         "start_page": ch["start_page"],
         "end_page": ch["end_page"],
-        "status": ch.get("status", "待整理"),
-        "completeness": ch.get("completeness", 0),
-        "notes": ch.get("notes", ""),
-        "extra_notes": ch.get("extra_notes", ""),
         "last_edit": str(datetime.date.today()),
-    }, on_conflict="num,name").execute()
+    }
+    # 先查是否存在
+    try:
+        existing = supabase.table("chapters")            .select("id")            .eq("num", ch["num"])            .eq("name", ch["name"])            .execute()
+        if existing.data:
+            # 已存在 → 只更新頁碼，不覆蓋 status/completeness/notes
+            supabase.table("chapters")                .update({"start_page": ch["start_page"],
+                         "end_page": ch["end_page"],
+                         "last_edit": str(datetime.date.today())})                .eq("num", ch["num"])                .eq("name", ch["name"])                .execute()
+        else:
+            # 不存在 → 新增
+            data["status"] = "待整理"
+            data["completeness"] = 0
+            data["notes"] = ""
+            data["extra_notes"] = ""
+            supabase.table("chapters").insert(data).execute()
+    except Exception as e:
+        st.warning(f"章節 {ch['num']}-{ch['name']} 儲存時發生問題：{e}")
 
 
 def db_upsert_content(chapter_num: str, chapter_name: str, text: str):
-    """儲存章節文字內容"""
-    supabase.table("chapter_content").upsert({
-        "chapter_num": chapter_num,
-        "chapter_name": chapter_name,
-        "text_content": text,
-        "updated_at": datetime.datetime.utcnow().isoformat(),
-    }, on_conflict="chapter_num,chapter_name").execute()
+    """儲存章節文字內容（先查後寫）"""
+    try:
+        existing = supabase.table("chapter_content")            .select("id")            .eq("chapter_num", chapter_num)            .eq("chapter_name", chapter_name)            .execute()
+        if existing.data:
+            supabase.table("chapter_content")                .update({"text_content": text,
+                         "updated_at": datetime.datetime.utcnow().isoformat()})                .eq("chapter_num", chapter_num)                .eq("chapter_name", chapter_name)                .execute()
+        else:
+            supabase.table("chapter_content").insert({
+                "chapter_num": chapter_num,
+                "chapter_name": chapter_name,
+                "text_content": text,
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }).execute()
+    except Exception as e:
+        st.warning(f"文字內容儲存問題：{e}")
 
 
 def db_upsert_images(chapter_num: str, chapter_name: str, images: list[dict]):
