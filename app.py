@@ -155,10 +155,13 @@ def extract_chapter_text(doc: fitz.Document, start: int, end: int) -> str:
 
 def extract_chapter_images(doc: fitz.Document, start: int, end: int) -> list[dict]:
     """
-    提取章節內所有嵌入圖片，回傳 base64 列表。
+    提取章節內所有嵌入圖片，壓縮後回傳 base64 列表。
     格式：[{page, index, data_b64, ext}, ...]
     """
     images = []
+    MAX_SIZE_KB = 300  # 每張圖最大300KB
+    MAX_DIMENSION = 1200  # 最大邊長1200px
+
     for pg in range(start - 1, min(end, len(doc))):
         page = doc[pg]
         img_list = page.get_images(full=True)
@@ -167,20 +170,40 @@ def extract_chapter_images(doc: fitz.Document, start: int, end: int) -> list[dic
             try:
                 base_img = doc.extract_image(xref)
                 img_bytes = base_img["image"]
-                ext = base_img["ext"]  # png / jpeg / etc.
 
-                # 用PIL檢查，過濾太小的icon（<50px）
+                # 用PIL處理
                 pil_img = Image.open(BytesIO(img_bytes))
                 w, h = pil_img.size
+
+                # 過濾太小的icon
                 if w < 50 or h < 50:
                     continue
 
-                b64 = base64.b64encode(img_bytes).decode('utf-8')
+                # 縮小過大的圖片
+                if w > MAX_DIMENSION or h > MAX_DIMENSION:
+                    pil_img.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.LANCZOS)
+                    w, h = pil_img.size
+
+                # 統一轉成JPEG壓縮（省空間）
+                if pil_img.mode in ('RGBA', 'P'):
+                    pil_img = pil_img.convert('RGB')
+
+                buf = BytesIO()
+                quality = 75
+                pil_img.save(buf, format='JPEG', quality=quality, optimize=True)
+
+                # 如果還是太大，繼續降低品質
+                while buf.tell() > MAX_SIZE_KB * 1024 and quality > 30:
+                    quality -= 15
+                    buf = BytesIO()
+                    pil_img.save(buf, format='JPEG', quality=quality, optimize=True)
+
+                b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
                 images.append({
                     'page': pg + 1,
                     'index': img_idx,
                     'data_b64': b64,
-                    'ext': ext,
+                    'ext': 'jpeg',
                     'width': w,
                     'height': h,
                 })
@@ -216,22 +239,27 @@ def db_upsert_content(chapter_num: str, chapter_name: str, text: str):
 
 
 def db_upsert_images(chapter_num: str, chapter_name: str, images: list[dict]):
-    """儲存章節圖片（base64存DB，也可改用Storage bucket）"""
+    """儲存章節圖片（逐張存入，附錯誤保護）"""
     if not images:
         return
-    # 先刪舊圖片再重寫（避免重複）
-    supabase.table("chapter_images").delete().eq("chapter_num", chapter_num).eq("chapter_name", chapter_name).execute()
+    try:
+        supabase.table("chapter_images").delete()            .eq("chapter_num", chapter_num)            .eq("chapter_name", chapter_name).execute()
+    except Exception:
+        pass
     for img in images:
-        supabase.table("chapter_images").insert({
-            "chapter_num": chapter_num,
-            "chapter_name": chapter_name,
-            "page_num": img["page"],
-            "img_index": img["index"],
-            "data_b64": img["data_b64"],
-            "ext": img["ext"],
-            "width": img["width"],
-            "height": img["height"],
-        }).execute()
+        try:
+            supabase.table("chapter_images").insert({
+                "chapter_num": chapter_num,
+                "chapter_name": chapter_name,
+                "page_num": img["page"],
+                "img_index": img["index"],
+                "data_b64": img["data_b64"],
+                "ext": img["ext"],
+                "width": img["width"],
+                "height": img["height"],
+            }).execute()
+        except Exception:
+            continue
 
 
 def db_load_chapters() -> list[dict]:
