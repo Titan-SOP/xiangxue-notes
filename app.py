@@ -472,35 +472,35 @@ elif page == "📚 章節整理":
                                         key=f"img_{ch['num']}_{ch['name']}",
                                         label_visibility="collapsed")
             if img_file:
-                with st.spinner("提取圖片中..."):
-                    try:
-                        raw = img_file.read()
-                        ftype = img_file.name.split(".")[-1].lower()
-                        if ftype == "docx":
-                            d = DocxDocument(BytesIO(raw))
-                            # 找到對應章節的段落範圍
-                            target = next((c for c in detect_chapters_docx(d)
-                                           if c["name"] == ch["name"]), None)
-                            if target:
-                                images = extract_images_docx(d, target["start_para"], target["end_para"])
+                img_file_id = f"img_{ch['num']}_{img_file.name}_{img_file.size}"
+                if st.session_state.get("last_img_uploaded") != img_file_id:
+                    st.session_state["last_img_uploaded"] = img_file_id
+                    with st.spinner("提取圖片中..."):
+                        try:
+                            raw = img_file.read()
+                            ftype = img_file.name.split(".")[-1].lower()
+                            if ftype == "docx":
+                                d = DocxDocument(BytesIO(raw))
+                                target = next((c for c in detect_chapters_docx(d)
+                                               if c["name"] == ch["name"]), None)
+                                if target:
+                                    images = extract_images_docx(d, target["start_para"], target["end_para"])
+                                else:
+                                    images = extract_images_docx(d, 0, len(d.paragraphs))
                             else:
-                                # 抓整個檔案的圖片
-                                images = extract_images_docx(d, 0, len(d.paragraphs))
-                        else:
-                            d = fitz.open(stream=raw, filetype="pdf")
-                            target = next((c for c in detect_chapters_pdf(d)
-                                           if c["name"] == ch["name"]), None)
-                            if target:
-                                images = extract_images_pdf(d, target["start_page"], target["end_page"])
-                            else:
-                                images = extract_images_pdf(d, 1, len(d))
-                            d.close()
-
-                        db_save_images(ch["num"], ch["name"], images)
-                        st.success(f"✅ 已上傳 {len(images)} 張圖片")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"圖片提取失敗：{e}")
+                                d = fitz.open(stream=raw, filetype="pdf")
+                                target = next((c for c in detect_chapters_pdf(d)
+                                               if c["name"] == ch["name"]), None)
+                                if target:
+                                    images = extract_images_pdf(d, target["start_page"], target["end_page"])
+                                else:
+                                    images = extract_images_pdf(d, 1, len(d))
+                                d.close()
+                            db_save_images(ch["num"], ch["name"], images)
+                            st.session_state[f"img_count_{ch['num']}"] = len(images)
+                            st.success(f"✅ 已上傳 {len(images)} 張圖片")
+                        except Exception as e:
+                            st.error(f"圖片提取失敗：{e}")
 
         st.divider()
 
