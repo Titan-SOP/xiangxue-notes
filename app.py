@@ -195,6 +195,24 @@ def db_clear_all_chapters():
     except Exception as e:
         st.warning(f"清除舊資料時發生問題：{e}")
 
+def db_delete_chapter(num: str, name: str):
+    """刪除單一章節及其所有資料"""
+    try:
+        supabase.table("chapter_images").delete().eq("chapter_num", num).eq("chapter_name", name).execute()
+        supabase.table("chapter_content").delete().eq("chapter_num", num).eq("chapter_name", name).execute()
+        supabase.table("chapters").delete().eq("num", num).eq("name", name).execute()
+    except Exception as e:
+        st.error(f"刪除失敗：{e}")
+
+def db_delete_chapter(num: str, name: str):
+    """刪除單一章節（含文字和圖片）"""
+    try:
+        supabase.table("chapter_images").delete().eq("chapter_num", num).eq("chapter_name", name).execute()
+        supabase.table("chapter_content").delete().eq("chapter_num", num).eq("chapter_name", name).execute()
+        supabase.table("chapters").delete().eq("num", num).eq("name", name).execute()
+    except Exception as e:
+        st.error(f"刪除失敗：{e}")
+
 def db_save_chapter(ch: dict):
     try:
         ex = supabase.table("chapters").select("id").eq("num", ch["num"]).eq("name", ch["name"]).execute()
@@ -491,10 +509,30 @@ elif page == "📚 章節整理":
             new_pct = st.slider("完成度", 0, 100, ch.get("completeness",0), 5)
         new_notes = st.text_area("備忘錄（私人，不進書稿）", value=ch.get("notes",""), height=60)
 
-        if st.button("💾 儲存狀態", type="primary"):
-            db_update_status(ch["num"], ch["name"], new_status, new_pct, new_notes, ch.get("extra_notes",""))
-            st.success("✅ 已更新")
-            st.rerun()
+        col_save, col_del = st.columns([3, 1])
+        with col_save:
+            if st.button("💾 儲存狀態", type="primary", use_container_width=True):
+                db_update_status(ch["num"], ch["name"], new_status, new_pct, new_notes, ch.get("extra_notes",""))
+                st.success("✅ 已更新")
+                st.rerun()
+        with col_del:
+            if st.button("🗑️ 刪除此章節", use_container_width=True):
+                st.session_state[f"confirm_del_{ch['num']}"] = True
+
+        # 刪除確認
+        if st.session_state.get(f"confirm_del_{ch['num']}"):
+            st.warning(f"⚠️ 確定要刪除「第{ch['num']}章 {ch['name']}」及其所有文字和圖片嗎？")
+            col_yes, col_no = st.columns(2)
+            with col_yes:
+                if st.button("✅ 確定刪除", type="primary", use_container_width=True):
+                    db_delete_chapter(ch["num"], ch["name"])
+                    del st.session_state[f"confirm_del_{ch['num']}"]
+                    st.success("已刪除")
+                    st.rerun()
+            with col_no:
+                if st.button("❌ 取消", use_container_width=True):
+                    del st.session_state[f"confirm_del_{ch['num']}"]
+                    st.rerun()
 
         st.divider()
 
