@@ -1,12 +1,15 @@
 """
 人相學書稿工作室 v2
+- 支援 Word (.docx) 和 PDF 上傳
 - 動態偵測章節（不寫死）
-- 提取PDF內嵌圖片
+- 提取嵌入圖片
 - Supabase 雲端儲存（文字、圖片、進度）
 """
 
 import streamlit as st
 import fitz  # PyMuPDF
+import docx
+from docx import Document as DocxDocument
 import json
 import os
 import re
@@ -212,6 +215,123 @@ def extract_chapter_images(doc: fitz.Document, start: int, end: int) -> list[dic
     return images
 
 
+
+
+# ── Word (.docx) 解析 ─────────────────────────────────────
+CHAPTER_PATTERNS = [
+    r'^([一二三四五六七八九十百千萬]+)[、，。\s]?【(.+?)】',
+    r'^第([一二三四五六七八九十百千萬\d]+)[章節、][\s\u3000]*(.+)',
+    r'^([一二三四五六七八九十百千萬]+)、(.+)',
+]
+
+def detect_chapters_from_docx(doc: DocxDocument) -> list[dict]:
+    """從Word文件動態偵測章節標題"""
+    chapters = []
+    para_idx = 0
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            para_idx += 1
+            continue
+        for pattern in CHAPTER_PATTERNS:
+            m = re.match(pattern, text)
+            if m:
+                num = m.group(1).strip()
+                name = m.group(2).strip()
+                if chapters and chapters[-1]['name'] == name:
+                    break
+                chapters.append({
+                    'num': num,
+                    'name': name,
+                    'start_para': para_idx,
+                    'end_para': None,
+                    'start_page': len(chapters) + 1,
+                    'end_page': len(chapters) + 1,
+                })
+                break
+        para_idx += 1
+
+    for i in range(len(chapters)):
+        if i + 1 < len(chapters):
+            chapters[i]['end_para'] = chapters[i + 1]['start_para'] - 1
+        else:
+            chapters[i]['end_para'] = para_idx
+
+    return chapters
+
+
+def extract_chapter_text_docx(doc: DocxDocument, start_para: int, end_para: int) -> str:
+    """從Word提取章節文字"""
+    lines = []
+    paras = doc.paragraphs[start_para:end_para]
+    for para in paras:
+        text = para.text.strip()
+        if text:
+            lines.append(text)
+    return '\n'.join(lines)
+
+
+def compress_image(img_bytes: bytes) -> tuple[str, int, int]:
+    """壓縮圖片並回傳 (base64, width, height)"""
+    MAX_SIZE_KB = 300
+    MAX_DIMENSION = 1200
+    try:
+        pil_img = Image.open(BytesIO(img_bytes))
+        w, h = pil_img.size
+        if w < 50 or h < 50:
+            return None, 0, 0
+        if w > MAX_DIMENSION or h > MAX_DIMENSION:
+            pil_img.thumbnail((MAX_DIMENSION, MAX_DIMENSION), Image.LANCZOS)
+            w, h = pil_img.size
+        if pil_img.mode in ('RGBA', 'P'):
+            pil_img = pil_img.convert('RGB')
+        buf = BytesIO()
+        quality = 75
+        pil_img.save(buf, format='JPEG', quality=quality, optimize=True)
+        while buf.tell() > MAX_SIZE_KB * 1024 and quality > 30:
+            quality -= 15
+            buf = BytesIO()
+            pil_img.save(buf, format='JPEG', quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return b64, w, h
+    except Exception:
+        return None, 0, 0
+
+
+def extract_chapter_images_docx(doc: DocxDocument, start_para: int, end_para: int) -> list[dict]:
+    """從Word段落中提取嵌入圖片"""
+    images = []
+    img_idx = 0
+    paras = doc.paragraphs[start_para:end_para]
+    for para_i, para in enumerate(paras):
+        for run in para.runs:
+            for elem in run._element:
+                # 找圖片關係
+                tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                if tag in ('drawing', 'pict'):
+                    # 從XML找圖片關係ID
+                    xml_str = elem.xml if hasattr(elem, 'xml') else str(elem)
+                    r_ids = re.findall(r'r:embed="(rId\d+)"', xml_str)
+                    for r_id in r_ids:
+                        try:
+                            rel = doc.part.rels.get(r_id)
+                            if rel and 'image' in rel.reltype:
+                                img_bytes = rel.target_part.blob
+                                b64, w, h = compress_image(img_bytes)
+                                if b64:
+                                    images.append({
+                                        'page': para_i + 1,
+                                        'index': img_idx,
+                                        'data_b64': b64,
+                                        'ext': 'jpeg',
+                                        'width': w,
+                                        'height': h,
+                                    })
+                                    img_idx += 1
+                        except Exception:
+                            continue
+    return images
+
 # ── Supabase 資料操作 ─────────────────────────────────────
 def db_upsert_chapter(ch: dict):
     """新增或更新章節基本資料"""
@@ -322,38 +442,53 @@ def progress_bar_html(pct: int) -> str:
 with st.sidebar:
     st.markdown("### 🏮 人相學書稿工作室")
 
-    # ── PDF上傳 ──
-    st.markdown("**📂 上傳新版筆記PDF**")
-    uploaded = st.file_uploader("選擇PDF", type=["pdf"], label_visibility="collapsed")
+    # ── 檔案上傳（Word 或 PDF）──
+    st.markdown("**📂 上傳筆記檔案**")
+    st.caption("支援 Word (.docx) 和 PDF，建議用 Word")
+    uploaded = st.file_uploader("選擇檔案", type=["docx", "pdf"], label_visibility="collapsed")
 
     if uploaded:
-        with st.spinner("解析PDF中（含圖片提取，請稍候）..."):
-            pdf_bytes = uploaded.read()
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            total_pages = len(doc)
+        file_type = uploaded.name.split(".")[-1].lower()
+        with st.spinner("解析中（含圖片提取，請稍候）..."):
 
-            detected = detect_chapters_from_pdf(doc)
+            if file_type == "docx":
+                # ── Word 處理 ──
+                doc_word = DocxDocument(BytesIO(uploaded.read()))
+                detected = detect_chapters_from_docx(doc_word)
+                if not detected:
+                    st.error("找不到章節標題，請確認檔案格式")
+                else:
+                    progress_bar = st.progress(0)
+                    for i, ch in enumerate(detected):
+                        text   = extract_chapter_text_docx(doc_word, ch["start_para"], ch["end_para"])
+                        images = extract_chapter_images_docx(doc_word, ch["start_para"], ch["end_para"])
+                        db_upsert_chapter(ch)
+                        db_upsert_content(ch["num"], ch["name"], text)
+                        db_upsert_images(ch["num"], ch["name"], images)
+                        progress_bar.progress((i + 1) / len(detected))
+                    st.success(f"✅ 完成！偵測到 {len(detected)} 個章節")
+                    st.rerun()
 
-            if not detected:
-                st.error("找不到章節標題，請確認PDF格式")
             else:
-                progress_bar = st.progress(0)
-                for i, ch in enumerate(detected):
-                    # 提取文字
-                    text = extract_chapter_text(doc, ch["start_page"], ch["end_page"])
-                    # 提取圖片
-                    images = extract_chapter_images(doc, ch["start_page"], ch["end_page"])
-
-                    # 存到Supabase
-                    db_upsert_chapter(ch)
-                    db_upsert_content(ch["num"], ch["name"], text)
-                    db_upsert_images(ch["num"], ch["name"], images)
-
-                    progress_bar.progress((i + 1) / len(detected))
-
-                doc.close()
-                st.success(f"✅ 完成！偵測到 {len(detected)} 個章節，共 {total_pages} 頁")
-                st.rerun()
+                # ── PDF 處理 ──
+                pdf_bytes = uploaded.read()
+                doc_pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+                total_pages = len(doc_pdf)
+                detected = detect_chapters_from_pdf(doc_pdf)
+                if not detected:
+                    st.error("找不到章節標題，請確認PDF格式")
+                else:
+                    progress_bar = st.progress(0)
+                    for i, ch in enumerate(detected):
+                        text   = extract_chapter_text(doc_pdf, ch["start_page"], ch["end_page"])
+                        images = extract_chapter_images(doc_pdf, ch["start_page"], ch["end_page"])
+                        db_upsert_chapter(ch)
+                        db_upsert_content(ch["num"], ch["name"], text)
+                        db_upsert_images(ch["num"], ch["name"], images)
+                        progress_bar.progress((i + 1) / len(detected))
+                    doc_pdf.close()
+                    st.success(f"✅ 完成！偵測到 {len(detected)} 個章節，共 {total_pages} 頁")
+                    st.rerun()
 
     st.divider()
 
