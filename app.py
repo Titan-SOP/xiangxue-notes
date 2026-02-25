@@ -318,43 +318,44 @@ with st.sidebar:
     st.caption("只提取文字和章節，圖片在章節整理頁單獨上傳")
     uploaded = st.file_uploader("Word / PDF", type=["docx", "pdf"], label_visibility="collapsed")
 
+    # 用 session_state 避免重複處理同一個檔案（防止抖動）
     if uploaded:
-        file_type = uploaded.name.split(".")[-1].lower()
-        with st.spinner("偵測章節並提取文字中..."):
-            try:
-                raw = uploaded.read()
-                if file_type == "docx":
-                    doc = DocxDocument(BytesIO(raw))
-                    chapters = detect_chapters_docx(doc)
-                    if not chapters:
-                        st.error("找不到章節標題，請確認章節格式為「一、【形局】」")
+        file_id = f"{uploaded.name}_{uploaded.size}"
+        if st.session_state.get("last_uploaded") != file_id:
+            st.session_state["last_uploaded"] = file_id
+            file_type = uploaded.name.split(".")[-1].lower()
+            with st.spinner("偵測章節並提取文字中..."):
+                try:
+                    raw = uploaded.read()
+                    if file_type == "docx":
+                        doc = DocxDocument(BytesIO(raw))
+                        chapters = detect_chapters_docx(doc)
+                        if not chapters:
+                            st.error("找不到章節標題，請確認章節格式為「一、【形局】」")
+                        else:
+                            bar = st.progress(0)
+                            for i, ch in enumerate(chapters):
+                                text = extract_text_docx(doc, ch["start_para"], ch["end_para"])
+                                db_save_chapter(ch)
+                                db_save_text(ch["num"], ch["name"], text)
+                                bar.progress((i+1)/len(chapters))
+                            st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
                     else:
-                        bar = st.progress(0)
-                        for i, ch in enumerate(chapters):
-                            text = extract_text_docx(doc, ch["start_para"], ch["end_para"])
-                            db_save_chapter(ch)
-                            db_save_text(ch["num"], ch["name"], text)
-                            bar.progress((i+1)/len(chapters))
-                        st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
-                        st.caption("圖片請到「章節整理」頁面按章節上傳")
-                        st.rerun()
-                else:
-                    doc = fitz.open(stream=raw, filetype="pdf")
-                    chapters = detect_chapters_pdf(doc)
-                    if not chapters:
-                        st.error("找不到章節標題")
-                    else:
-                        bar = st.progress(0)
-                        for i, ch in enumerate(chapters):
-                            text = extract_text_pdf(doc, ch["start_page"], ch["end_page"])
-                            db_save_chapter(ch)
-                            db_save_text(ch["num"], ch["name"], text)
-                            bar.progress((i+1)/len(chapters))
-                        doc.close()
-                        st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
-                        st.rerun()
-            except Exception as e:
-                st.error(f"上傳失敗：{e}")
+                        doc = fitz.open(stream=raw, filetype="pdf")
+                        chapters = detect_chapters_pdf(doc)
+                        if not chapters:
+                            st.error("找不到章節標題")
+                        else:
+                            bar = st.progress(0)
+                            for i, ch in enumerate(chapters):
+                                text = extract_text_pdf(doc, ch["start_page"], ch["end_page"])
+                                db_save_chapter(ch)
+                                db_save_text(ch["num"], ch["name"], text)
+                                bar.progress((i+1)/len(chapters))
+                            doc.close()
+                            st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
+                except Exception as e:
+                    st.error(f"上傳失敗：{e}")
 
     st.divider()
 
