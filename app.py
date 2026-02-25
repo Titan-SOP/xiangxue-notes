@@ -327,9 +327,20 @@ with st.sidebar:
     st.caption("只提取文字和章節，圖片在章節整理頁單獨上傳")
     uploaded = st.file_uploader("Word / PDF", type=["docx", "pdf"], label_visibility="collapsed")
 
-    # 模式選擇：全新上傳（清除舊資料）或追加新章節
-    upload_mode = st.radio("上傳模式", ["🔄 全新上傳（清除所有舊資料）", "➕ 追加新章節（保留現有資料）"],
-                           label_visibility="collapsed")
+    # 上傳模式
+    upload_mode = st.radio("上傳模式", [
+        "🔄 全新上傳（清除所有舊資料）",
+        "➕ 追加新章節（自動偵測章節）",
+        "📌 單章節指定上傳（整個檔案=一個章節）"
+    ], label_visibility="collapsed")
+
+    # 單章節指定模式：直接指定章節編號和名稱
+    if "單章節" in upload_mode:
+        col_n, col_t = st.columns(2)
+        with col_n:
+            single_num = st.text_input("章節編號", placeholder="例：四", key="single_num")
+        with col_t:
+            single_name = st.text_input("章節名稱", placeholder="例：眼神", key="single_name")
 
     # 用 session_state 避免重複處理同一個檔案（防止抖動）
     if uploaded:
@@ -337,40 +348,62 @@ with st.sidebar:
         if st.session_state.get("last_uploaded") != file_id:
             st.session_state["last_uploaded"] = file_id
             file_type = uploaded.name.split(".")[-1].lower()
-            with st.spinner("偵測章節並提取文字中..."):
+            with st.spinner("處理中..."):
                 try:
-                    # 全新上傳模式：先清除所有舊資料
                     if "全新上傳" in upload_mode:
                         db_clear_all_chapters()
 
                     raw = uploaded.read()
-                    if file_type == "docx":
-                        doc = DocxDocument(BytesIO(raw))
-                        chapters = detect_chapters_docx(doc)
-                        if not chapters:
-                            st.error("找不到章節標題，請確認章節格式為「一、【形局】」")
+
+                    # ── 單章節指定模式 ──
+                    if "單章節" in upload_mode:
+                        s_num  = st.session_state.get("single_num", "").strip()
+                        s_name = st.session_state.get("single_name", "").strip()
+                        if not s_num or not s_name:
+                            st.error("請填寫章節編號和名稱")
                         else:
-                            bar = st.progress(0)
-                            for i, ch in enumerate(chapters):
-                                text = extract_text_docx(doc, ch["start_para"], ch["end_para"])
-                                db_save_chapter(ch)
-                                db_save_text(ch["num"], ch["name"], text)
-                                bar.progress((i+1)/len(chapters))
-                            st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
+                            if file_type == "pdf":
+                                doc = fitz.open(stream=raw, filetype="pdf")
+                                text = extract_text_pdf(doc, 1, len(doc))
+                                doc.close()
+                            else:
+                                doc = DocxDocument(BytesIO(raw))
+                                text = extract_text_docx(doc, 0, len(doc.paragraphs))
+                            ch = {"num": s_num, "name": s_name,
+                                  "start_page": 1, "end_page": 1}
+                            db_save_chapter(ch)
+                            db_save_text(s_num, s_name, text)
+                            st.success(f"✅ 已匯入第{s_num}章《{s_name}》")
+
+                    # ── 自動偵測模式 ──
                     else:
-                        doc = fitz.open(stream=raw, filetype="pdf")
-                        chapters = detect_chapters_pdf(doc)
-                        if not chapters:
-                            st.error("找不到章節標題")
+                        if file_type == "docx":
+                            doc = DocxDocument(BytesIO(raw))
+                            chapters = detect_chapters_docx(doc)
+                            if not chapters:
+                                st.error("找不到章節標題，請改用「單章節指定上傳」")
+                            else:
+                                bar = st.progress(0)
+                                for i, ch in enumerate(chapters):
+                                    text = extract_text_docx(doc, ch["start_para"], ch["end_para"])
+                                    db_save_chapter(ch)
+                                    db_save_text(ch["num"], ch["name"], text)
+                                    bar.progress((i+1)/len(chapters))
+                                st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
                         else:
-                            bar = st.progress(0)
-                            for i, ch in enumerate(chapters):
-                                text = extract_text_pdf(doc, ch["start_page"], ch["end_page"])
-                                db_save_chapter(ch)
-                                db_save_text(ch["num"], ch["name"], text)
-                                bar.progress((i+1)/len(chapters))
-                            doc.close()
-                            st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
+                            doc = fitz.open(stream=raw, filetype="pdf")
+                            chapters = detect_chapters_pdf(doc)
+                            if not chapters:
+                                st.error("找不到章節，請改用「單章節指定上傳」")
+                            else:
+                                bar = st.progress(0)
+                                for i, ch in enumerate(chapters):
+                                    text = extract_text_pdf(doc, ch["start_page"], ch["end_page"])
+                                    db_save_chapter(ch)
+                                    db_save_text(ch["num"], ch["name"], text)
+                                    bar.progress((i+1)/len(chapters))
+                                doc.close()
+                                st.success(f"✅ 完成！偵測到 {len(chapters)} 個章節")
                 except Exception as e:
                     st.error(f"上傳失敗：{e}")
 
