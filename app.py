@@ -120,21 +120,16 @@ def detect_chapters_from_pdf(doc: fitz.Document) -> list[dict]:
         first_lines = text.strip().split('\n')[:5]  # 只看前5行
         for line in first_lines:
             line = line.strip()
-            for pattern in CHAPTER_PATTERNS:
-                m = re.match(pattern, line)
-                if m:
-                    num = m.group(1).strip()
-                    name = m.group(2).strip()
-                    # 避免重複偵測同一章節
-                    if chapters and chapters[-1]['name'] == name:
-                        continue
-                    chapters.append({
-                        'num': num,
-                        'name': name,
-                        'start_page': page_idx + 1,
-                        'end_page': None,
-                    })
-                    break
+            matched, num, name = is_main_chapter(line)
+            if matched:
+                if chapters and chapters[-1]['name'] == name:
+                    continue
+                chapters.append({
+                    'num': num,
+                    'name': name,
+                    'start_page': page_idx + 1,
+                    'end_page': None,
+                })
 
     # 填入 end_page
     for i in range(len(chapters)):
@@ -219,13 +214,23 @@ def extract_chapter_images(doc: fitz.Document, start: int, end: int) -> list[dic
 
 # ── Word (.docx) 解析 ─────────────────────────────────────
 CHAPTER_PATTERNS = [
-    r'^([一二三四五六七八九十百千萬]+)[、，。\s]?【(.+?)】',
-    r'^第([一二三四五六七八九十百千萬\d]+)[章節、][\s\u3000]*(.+)',
-    r'^([一二三四五六七八九十百千萬]+)、(.+)',
+    # 主章節：「一、【形局】」或「一、【形局】補充說明」
+    # 條件：中文數字開頭 + 頓號 + 【】，且不含「之」（排除子標題如「三之一」）
+    r'^([一二三四五六七八九十]+)[、]【([^】]+)】',
 ]
 
+def is_main_chapter(text: str) -> tuple:
+    """判斷是否為主章節標題，回傳 (是否符合, num, name)"""
+    import re
+    # 必須有【】，且「、」前面的數字不能含「之」
+    m = re.match(r'^([一二三四五六七八九十]+)、【([^】]+)】', text.strip())
+    if m:
+        return True, m.group(1), m.group(2)
+    return False, '', ''
+
+
 def detect_chapters_from_docx(doc: DocxDocument) -> list[dict]:
-    """從Word文件動態偵測章節標題"""
+    """從Word文件動態偵測主章節標題（只抓有【】的主標題）"""
     chapters = []
     para_idx = 0
     for para in doc.paragraphs:
@@ -233,13 +238,10 @@ def detect_chapters_from_docx(doc: DocxDocument) -> list[dict]:
         if not text:
             para_idx += 1
             continue
-        for pattern in CHAPTER_PATTERNS:
-            m = re.match(pattern, text)
-            if m:
-                num = m.group(1).strip()
-                name = m.group(2).strip()
-                if chapters and chapters[-1]['name'] == name:
-                    break
+        matched, num, name = is_main_chapter(text)
+        if matched:
+            # 避免重複同名章節
+            if not (chapters and chapters[-1]['name'] == name):
                 chapters.append({
                     'num': num,
                     'name': name,
@@ -248,7 +250,6 @@ def detect_chapters_from_docx(doc: DocxDocument) -> list[dict]:
                     'start_page': len(chapters) + 1,
                     'end_page': len(chapters) + 1,
                 })
-                break
         para_idx += 1
 
     for i in range(len(chapters)):
