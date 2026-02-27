@@ -293,6 +293,13 @@ def db_load_images(num: str, name: str) -> list:
     except Exception:
         return []
 
+def db_update_image_caption(img_id: int, caption: str):
+    """更新單張圖片的說明文字"""
+    try:
+        supabase.table("chapter_images").update({"caption": caption}).eq("id", img_id).execute()
+    except Exception as e:
+        st.warning(f"圖片說明儲存失敗：{e}")
+
 # ── AI 整理逐字稿 ─────────────────────────────────────────
 def ai_organize_transcript(transcript: str, chapter_name: str) -> str:
     """呼叫 Claude API 將 Whisper 逐字稿整理成結構化筆記"""
@@ -331,8 +338,19 @@ def render_images(images: list):
     cols = st.columns(min(len(images), 4))
     for i, img in enumerate(images):
         with cols[i % 4]:
+            existing_caption = img.get("caption") or ""
             st.image(base64.b64decode(img["data_b64"]),
-                     caption=f"第{img['page_num']}頁 ({img['width']}×{img['height']})")
+                     caption=existing_caption or f"第{img['page_num']}頁-{img['img_index']+1}")
+            new_cap = st.text_input("圖片說明",
+                                    value=existing_caption,
+                                    key=f"cap_{img['id']}",
+                                    placeholder="例：鳳眼範例",
+                                    label_visibility="collapsed")
+            if new_cap != existing_caption:
+                if st.button("💾", key=f"savecap_{img['id']}", help="儲存說明"):
+                    db_update_image_caption(img["id"], new_cap)
+                    st.success("✅")
+                    st.rerun()
 
 # ══════════════════════════════════════════════════════════
 # Sidebar
@@ -716,24 +734,36 @@ elif page == "📤 匯出書稿":
 
         with col_a:
             st.markdown("#### 📄 完整書稿（Markdown）")
-            st.caption("含所有章節文字與補充筆記，可在 Notion / Typora 繼續編輯")
+            include_images = st.checkbox("📷 含圖片（檔案較大，約 10–50MB）", value=False)
+            st.caption("含所有章節文字、補充筆記，可在 Notion / Typora 繼續編輯")
             if st.button("生成書稿", type="primary", use_container_width=True):
                 today = datetime.date.today().strftime('%Y年%m月%d日')
                 lines = [f"# 人相學相理精要\n\n整理日期：{today}\n\n---\n\n## 目錄\n"]
                 for c in all_chapters:
                     lines.append(f"- 第{c['num']}章　{c['name']}　（{c['status']} {c['completeness']}%）")
                 lines.append("\n---\n")
-                for c in all_chapters:
-                    text = db_load_text(c["num"], c["name"])
-                    extra = c.get("extra_notes","")
-                    lines.append(f"\n## 第{c['num']}章　【{c['name']}】\n")
-                    if text:
-                        lines.append("### 原始筆記\n" + text)
-                    if extra:
-                        lines.append("\n### 補充整理\n" + extra)
-                    lines.append("\n---")
+                with st.spinner("生成書稿中..." + ("（含圖片，需要較長時間）" if include_images else "")):
+                    for c in all_chapters:
+                        text = db_load_text(c["num"], c["name"])
+                        extra = c.get("extra_notes","")
+                        lines.append(f"\n## 第{c['num']}章　【{c['name']}】\n")
+                        if text:
+                            lines.append("### 原始筆記\n" + text)
+                        if extra:
+                            lines.append("\n### 補充整理\n" + extra)
+                        # 圖片
+                        if include_images:
+                            imgs = db_load_images(c["num"], c["name"])
+                            if imgs:
+                                lines.append("\n### 圖片資料\n")
+                                for img in imgs:
+                                    cap = img.get("caption") or f"第{img['page_num']}頁-{img['img_index']+1}"
+                                    b64 = img["data_b64"]
+                                    lines.append(f"![{cap}](data:image/jpeg;base64,{b64})\n")
+                                    lines.append(f"*{cap}*\n")
+                        lines.append("\n---")
                 manuscript = '\n'.join(lines)
-                fname = f"人相學精要_{datetime.date.today().strftime('%Y%m%d')}.md"
+                fname = f"人相學精要_{datetime.date.today().strftime('%Y%m%d')}{'_含圖片' if include_images else ''}.md"
                 st.download_button("⬇️ 下載書稿 .md", manuscript.encode("utf-8"),
                                    file_name=fname, mime="text/markdown", use_container_width=True)
 
